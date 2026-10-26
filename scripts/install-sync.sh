@@ -13,6 +13,7 @@ mkdir -p "$PREFIX/bin"
 install -m 0755 "$ROOT/bin/proton-drive-sync" "$PREFIX/bin/proton-drive-sync"
 info "installed $PREFIX/bin/proton-drive-sync"
 
+# Starter config with Documents/Pictures if present (no empty file).
 "$PREFIX/bin/proton-drive-sync" init
 
 if [[ "$WITH_TIMER" == "1" ]]; then
@@ -26,11 +27,11 @@ if [[ "$WITH_TIMER" == "1" ]]; then
   info "logs: journalctl --user -u proton-drive-sync.service -n 50"
 fi
 
-info "done. Next:"
-info "  1) scripts/install-cli.sh"
-info "  2) edit ~/.config/proton-drive-sync/config"
-info "  3) proton-drive-sync login"
-info "  4) proton-drive-sync doctor"
-info "  5) proton-drive-sync --dry-run sync"
-info "  6) proton-drive-sync sync"
-info "Optional timer: WITH_TIMER=1 $0"
+info ""
+info "Next steps (simple):"
+info "  export PATH=\"$PREFIX/bin:\$PATH\""
+info "  proton-drive-sync setup    # choose folders by answering O/n (recommended)"
+info "  proton-drive-sync login    # sign in with the browser"
+info "  proton-drive-sync sync     # back up"
+info ""
+info "Optional auto backup every 6h: WITH_TIMER=1 $0"

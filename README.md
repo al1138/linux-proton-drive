@@ -1,130 +1,165 @@
 # linux-proton-drive
 
-Minimal, safety-first folder sync for **Linux** using the
-[official Proton Drive CLI](https://proton.me/support/drive-cli).
+Back up folders from your **Linux PC** to [Proton Drive](https://proton.me/support/drive-cli)
+using Proton’s **official** command-line tool.
 
-> **Not affiliated with Proton AG.** See [`NOTICE`](NOTICE).
-> This is **not** a real-time desktop sync client. Proton’s CLI runs atomic
-> upload/download commands and exits. That design is intentional for security.
+> **Not affiliated with Proton AG.** See [`NOTICE`](NOTICE).  
+> This is **backup on a schedule**, not Dropbox-style instant sync. That is
+> intentional: safer if you delete a file by mistake or malware runs.
 
-## Principles
+**French / guide grand public :** [`README.fr.md`](README.fr.md)
 
-| Choice | Why |
-|--------|-----|
-| Official binary + **SHA-512** verify | Trust Proton’s release, not a reimplementation |
-| Session in **libsecret** or `pass` | No password/token in config files |
-| Default mode **`push`** | Incremental local → Drive backup |
-| Push conflicts: `create-new-revision` | Keep Drive history; unchanged files skipped by CLI |
-| Pull conflicts: `skip` | Never overwrite local files silently |
-| **No automatic deletes** | Local `rm` / ransomware does not wipe Drive |
-| `flock` + systemd user timer | One run at a time, reliable schedule |
-| `--dry-run` / `doctor` | Inspect before writing |
+## You do not need to edit a blank config file
 
-This is **not** a bidirectional mirror with deletions (unlike `rclone sync`).
-That behaviour is refused by default on purpose.
-
-## Requirements
-
-- Linux (Mint, Ubuntu, Debian, Fedora, …)
-- Bash 4+, `curl`, `sha512sum`, `flock` (util-linux)
-- Desktop session with a secret store (GNOME Keyring / KWallet) **or** [`pass`](https://www.passwordstore.org/)
+A **setup assistant** asks which folders to back up and writes the config for you:
 
 ```bash
-# Debian / Ubuntu / Linux Mint
-sudo apt update
-sudo apt install -y curl ca-certificates libsecret-1-0 libsecret-tools util-linux
+proton-drive-sync setup
 ```
 
-## Install
+## Quick start (Mint / Ubuntu)
 
 ```bash
+sudo apt update
+sudo apt install -y curl ca-certificates libsecret-1-0 libsecret-tools util-linux
+
 git clone https://github.com/al1138/linux-proton-drive.git
 cd linux-proton-drive
 
-./scripts/install-cli.sh      # official CLI + SHA-512 check
-./scripts/install-sync.sh     # wrapper + config skeleton
-
-# Edit folder pairs, then lock down permissions
-${EDITOR:-nano} ~/.config/proton-drive-sync/config
-chmod 600 ~/.config/proton-drive-sync/config
+./scripts/install-cli.sh      # official Proton CLI (SHA-512 verified)
+./scripts/install-sync.sh     # installs the helper + a starter config
 
 export PATH="$HOME/.local/bin:$PATH"
-proton-drive-sync login
-proton-drive-sync doctor
-proton-drive-sync --dry-run sync
-proton-drive-sync sync
+
+proton-drive-sync setup       # choose folders (Documents, Pictures, …)
+proton-drive-sync login       # browser sign-in
+proton-drive-sync doctor      # sanity check
+proton-drive-sync --dry-run sync   # preview only
+proton-drive-sync sync        # real backup
 ```
 
-Optional systemd user timer (every 6 hours):
+Optional automatic backup every 6 hours:
 
 ```bash
 WITH_TIMER=1 ./scripts/install-sync.sh
-systemctl --user list-timers | grep proton
-journalctl --user -u proton-drive-sync.service -n 50
 ```
 
-## Configuration
+## What the config is (plain language)
 
-File: `~/.config/proton-drive-sync/config` (see `config/config.example`).
+| | |
+|--|--|
+| **File** | `~/.config/proton-drive-sync/config` |
+| **Who creates it** | `setup` (questions) or `init` (automatic defaults) |
+| **What it stores** | Which PC folders to copy, and where they go in Proton Drive |
+| **What it does *not* store** | Your Proton password (that stays in the system keyring) |
+
+After `setup`, open it only if you are curious:
 
 ```bash
-PAIR_documents="__HOME__/Documents|/my-files/Linux/Documents|push"
-PAIR_pictures="__HOME__/Pictures|/my-files/Linux/Pictures|push"
+proton-drive-sync status
 ```
 
-`proton-drive-sync init` replaces `__HOME__` with your `$HOME`.
+### How to read one line
 
-| Mode | Effect |
-|------|--------|
-| `push` | Local → Drive (recommended default) |
-| `pull` | Drive → local (won’t overwrite existing local files) |
-| `both` | Push then pull |
+```bash
+PAIR_documents="/home/USER/Documents|/my-files/Linux/Documents|push"
+```
 
-Drive paths must be absolute (typically under `/my-files/...`).
+Means: *take the Documents folder on this PC, and upload a copy into
+`/my-files/Linux/Documents` on Proton Drive.*
 
-## Commands
+| Piece | Meaning |
+|-------|---------|
+| `PAIR_documents` | A name for this backup job |
+| Left path | Folder **on your computer** |
+| Right path | Folder **inside Proton Drive** |
+| `push` | PC → cloud (normal backup) |
+
+Other modes (rarely needed at first): `pull` (cloud → PC), `both` (push then pull).  
+Deleted local files are **not** deleted in the cloud.
+
+### Change folders later
+
+Just run the assistant again (it can replace the old file):
+
+```bash
+proton-drive-sync setup
+```
+
+### Advanced: edit by hand
+
+Only if you prefer. Template with every option:
+[`config/config.example`](config/config.example).
+
+```bash
+nano ~/.config/proton-drive-sync/config
+chmod 600 ~/.config/proton-drive-sync/config
+```
+
+Add a line like:
+
+```bash
+PAIR_projects="/home/USER/Projects|/my-files/Linux/projects|push"
+```
+
+Use your real home directory (`echo $HOME`), not the word `USER`.
+
+### Optional settings
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `PROTON_DRIVE_BIN` | set by setup | Path to the official `proton-drive` program |
+| `CREDENTIALS_STORE` | `keychain` | System keyring (`pass` also allowed; `unsafe_file` refused) |
+| `ALLOW_DELETE` | `0` | Keep at `0` unless you knowingly accept overwriting local files on pull |
+
+## Everyday commands
 
 ```bash
 proton-drive-sync status
 proton-drive-sync doctor
-proton-drive-sync push
-proton-drive-sync pull <pair>
 proton-drive-sync sync
 proton-drive-sync --dry-run sync
 proton-drive-sync logout
 ```
 
-CLI JSON logs: `~/.local/state/proton-drive-sync/logs/`.
+Logs: `~/.local/state/proton-drive-sync/logs/`
+
+## Principles (why it is built this way)
+
+| Choice | Why |
+|--------|-----|
+| Official binary + SHA-512 check | Trust Proton’s release |
+| Session in libsecret / `pass` | No secrets in the config file |
+| Default `push` | Incremental backup |
+| No automatic deletes | Safer against mistakes and ransomware |
+| Timer / manual runs | No always-on sync daemon |
 
 ## Limits
 
-- No instant sync on every file save (use the timer, cron, or a manual run).
-- Locally deleted files **remain** on Drive by design.
-- Proton Docs / Sheets are not downloaded as regular files (CLI limitation).
-- Respect Proton [fair use](https://proton.me/blog/proton-drive-cli) guidance.
-- An official Linux desktop app remains on Proton’s [roadmap](https://proton.me/drive/roadmap); this project only bridges the gap with the CLI.
+- Not instant sync on every save (use the timer or run `sync` yourself).
+- Local deletions stay on Drive on purpose.
+- Proton Docs/Sheets are not downloaded as normal files (CLI limit).
+- Follow Proton [fair use](https://proton.me/blog/proton-drive-cli) guidance.
 
 ## Upgrading the official CLI
 
-1. Check version + checksums at <https://proton.me/download/drive/cli/>
-2. Update `CLI_VERSION` and `CHECKSUMS` in `scripts/install-cli.sh`
-3. Re-run: `./scripts/install-cli.sh --force`
+1. Check <https://proton.me/download/drive/cli/>
+2. Update version + checksums in `scripts/install-cli.sh`
+3. `./scripts/install-cli.sh --force`
 
 ## Troubleshooting
 
-| Symptom | Hint |
-|---------|------|
-| Auth fails | Unlock the graphical keyring; install `secret-tool`; run `login` again |
-| `Illegal instruction` | CPU without AVX2 — check Proton’s download page for a baseline build |
-| Interactive conflict prompts | Wrapper always passes `--json` + explicit strategies |
-| Parallel runs | Blocked by `flock` on `~/.local/state/proton-drive-sync/sync.lock` |
+| Symptom | What to try |
+|---------|-------------|
+| Not logged in | `proton-drive-sync login` (desktop session unlocked) |
+| No folders in setup | Create Documents/Pictures in the file manager, run `setup` again |
+| Want a safe preview | `proton-drive-sync --dry-run sync` |
 
 ## Contributing / security
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md).
+[`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md)
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
-The `proton-drive` binary is provided by Proton AG under Proton’s terms; this
-repository does not vendor that binary.
+MIT — [`LICENSE`](LICENSE).  
+The `proton-drive` binary is from Proton AG; this repo does not redistribute it.

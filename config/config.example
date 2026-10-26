@@ -1,46 +1,34 @@
-# proton-drive-sync configuration
-# Installed copy: ~/.config/proton-drive-sync/config  (chmod 600)
-# Docs: https://proton.me/support/drive-cli
+# =============================================================================
+# Advanced template (optional)
+# =============================================================================
+# Most people should NOT copy this by hand.
+# Prefer:  proton-drive-sync setup
 #
-# Tokens of the form shown in paths below are replaced with $HOME by
-# `proton-drive-sync init`. Do not commit your generated config file.
+# If you already ran setup/init, your real file is:
+#   ~/.config/proton-drive-sync/config
+# =============================================================================
 
-# Official CLI binary (full path recommended after install-cli.sh)
+# Path to the official Proton Drive CLI
 PROTON_DRIVE_BIN="__HOME__/.local/bin/proton-drive"
 
-# Session storage: keychain (libsecret / GNOME Keyring) or pass
-# Never use unsafe_file — refused by proton-drive-sync
+# Where the login session is stored: keychain (recommended) or pass
+# unsafe_file is refused by proton-drive-sync
 CREDENTIALS_STORE="keychain"
 
-# Safer, quieter uploads (thumbnails optional)
 SKIP_THUMBNAILS=1
 
-# Push (local → Drive): keep Drive revision history
+# Upload behaviour (backup)
 PUSH_FILE_CONFLICT="create-new-revision"
 PUSH_FOLDER_CONFLICT="merge"
 
-# Pull (Drive → local): never overwrite local files by default
+# Download behaviour (keep local files safe)
 PULL_FILE_CONFLICT="skip"
 PULL_FOLDER_CONFLICT="merge"
 
-# Set to 1 only if you accept overwriting local files on pull conflicts
+# Keep at 0 unless you knowingly accept overwriting local files on pull
 ALLOW_DELETE=0
 
-# ---------------------------------------------------------------------------
-# Folder pairs (one per line)
-# Format: PAIR_<name>=<local_absolute_path>|<remote_drive_path>|<mode>
-# mode: push | pull | both
-#
-# Security note: default to "push" (backup). The official CLI does NOT
-# delete remote files when local files disappear — that is intentional
-# and safer against ransomware / accidental rm.
-# ---------------------------------------------------------------------------
-
+# Folder pairs:
+# PAIR_<name>="<pc_folder>|<proton_drive_folder>|<push|pull|both>"
 PAIR_documents="__HOME__/Documents|/my-files/Linux/Documents|push"
 PAIR_pictures="__HOME__/Pictures|/my-files/Linux/Pictures|push"
-
-# Example pull-only (new remote files appear locally; existing local kept):
-# PAIR_shared="__HOME__/ProtonShared|/my-files/Shared|pull"
-
-# Example both ways (push revisions first, then pull with skip):
-# PAIR_notes="__HOME__/Notes|/my-files/Linux/Notes|both"

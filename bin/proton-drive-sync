@@ -41,14 +41,15 @@ Usage:
   $APP_NAME <command> [options] [pair...]
 
 Commands:
-  init              Create config dir + example config
-  login             Browser login (stores session in OS secret store)
-  logout            Clear CLI session
-  status            Show binary, auth, pairs, last runs
-  push [pair...]    Local → Proton Drive
-  pull [pair...]    Proton Drive → local
-  sync [pair...]    Run each pair according to its mode (push|pull|both)
-  doctor            Preflight checks (binary, secret store, paths)
+  setup             Guided setup (recommended): choose folders, write config
+  init              Create a ready-to-use config automatically (no questions)
+  login             Sign in via browser (session stored in the system keyring)
+  logout            Sign out
+  status            Show settings and folder list
+  push [pair...]    Upload local folders → Proton Drive
+  pull [pair...]    Download Proton Drive → local folders
+  sync [pair...]    Run each folder pair (push / pull / both)
+  doctor            Check that everything is ready
 
 Options:
   -c, --config PATH   Config file (default: $CONFIG_FILE)
@@ -222,19 +223,310 @@ with_lock() {
   trap - EXIT
 }
 
+use_french() {
+  case "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" in
+    fr|fr_*|fr.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+say() {
+  # Plain messages for humans (no timestamp) — used by setup/init.
+  printf '%s\n' "$*"
+}
+
+find_cli_bin() {
+  if [[ -n "${PROTON_DRIVE_BIN:-}" && "$PROTON_DRIVE_BIN" == /* && -x "$PROTON_DRIVE_BIN" ]]; then
+    printf '%s' "$PROTON_DRIVE_BIN"
+    return
+  fi
+  if [[ -x "$HOME/.local/bin/proton-drive" ]]; then
+    printf '%s' "$HOME/.local/bin/proton-drive"
+    return
+  fi
+  if command -v proton-drive >/dev/null 2>&1; then
+    command -v proton-drive
+    return
+  fi
+  printf '%s' "$HOME/.local/bin/proton-drive"
+}
+
+# Args: name local_path remote_path mode  (repeatable groups written by caller into arrays)
+write_simple_config() {
+  local bin="$1"
+  shift
+  # Remaining: triples name|local|remote|mode via parallel arrays passed as lines "name|local|remote|mode"
+  local -a lines=("$@")
+  local line name local_path remote_path mode
+
+  ensure_dirs
+  {
+    cat <<EOF
+# =============================================================================
+# Proton Drive — dossiers sauvegardés depuis cet ordinateur
+# =============================================================================
+#
+# Ce fichier a été créé pour vous. En général vous n'avez RIEN à modifier.
+#
+# Chaque ligne qui commence par PAIR_ décrit UN dossier :
+#   PAIR_nom="dossier_sur_le_PC|dossier_dans_Proton_Drive|push"
+#
+#   push = envoyer une copie vers Proton Drive (sauvegarde, recommandé)
+#   pull = télécharger depuis Proton Drive vers le PC
+#   both = les deux (d'abord envoi, puis réception)
+#
+# Les fichiers effacés sur le PC ne sont PAS effacés sur Proton Drive
+# (sécurité : une fausse manip ou un virus ne vide pas le cloud).
+#
+# Emplacement de ce fichier : $CONFIG_FILE
+# =============================================================================
+
+PROTON_DRIVE_BIN="$bin"
+CREDENTIALS_STORE="keychain"
+ALLOW_DELETE=0
+SKIP_THUMBNAILS=1
+
+EOF
+    for line in "${lines[@]}"; do
+      IFS='|' read -r name local_path remote_path mode <<<"$line"
+      printf '# %s\n' "$local_path  →  $remote_path  ($mode)"
+      printf 'PAIR_%s="%s|%s|%s"\n\n' "$name" "$local_path" "$remote_path" "$mode"
+    done
+  } >"$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE"
+}
+
+default_folder_candidates() {
+  # Prints: id|Label|local_path|remote_path
+  local d
+  for d in Documents Documenten Documenti; do
+    [[ -d "$HOME/$d" ]] && echo "documents|Documents|$HOME/$d|/my-files/Linux/Documents" && break
+  done
+  for d in Pictures Photos Images Bilder; do
+    [[ -d "$HOME/$d" ]] && echo "pictures|Pictures / Photos|$HOME/$d|/my-files/Linux/Pictures" && break
+  done
+  for d in Desktop Bureau Schreibtisch; do
+    [[ -d "$HOME/$d" ]] && echo "desktop|Desktop / Bureau|$HOME/$d|/my-files/Linux/Desktop" && break
+  done
+  for d in Downloads Téléchargements; do
+    [[ -d "$HOME/$d" ]] && echo "downloads|Downloads / Téléchargements|$HOME/$d|/my-files/Linux/Downloads" && break
+  done
+}
+
+ask_yn() {
+  # $1 prompt, default yes if empty answer
+  local prompt="$1" reply
+  if use_french; then
+    printf '%s [O/n] ' "$prompt" >&2
+  else
+    printf '%s [Y/n] ' "$prompt" >&2
+  fi
+  read -r reply || true
+  reply="${reply:-Y}"
+  case "$reply" in
+    O|o|Oui|oui|Y|y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 cmd_init() {
   ensure_dirs
-  local example
-  example="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/config/config.example"
   if [[ -f "$CONFIG_FILE" ]]; then
-    info "config already exists: $CONFIG_FILE"
-  else
-    [[ -f "$example" ]] || die "missing example config at $example"
-    sed "s|__HOME__|$HOME|g" "$example" >"$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE"
-    info "wrote $CONFIG_FILE (edit pairs before first sync)"
+    if use_french; then
+      say "Une configuration existe déjà : $CONFIG_FILE"
+      say "Pour la refaire avec l'assistant : proton-drive-sync setup"
+    else
+      say "Config already exists: $CONFIG_FILE"
+      say "To recreate it with the assistant: proton-drive-sync setup"
+    fi
+    return 0
   fi
-  info "state/logs: $STATE_DIR"
+
+  local bin candidate id label local_path remote_path
+  local -a pairs=()
+  bin=$(find_cli_bin)
+
+  while IFS='|' read -r id label local_path remote_path; do
+    [[ -n "$id" ]] || continue
+    # Auto-include Documents + Pictures only (safe defaults); others via setup
+    case "$id" in
+      documents|pictures) pairs+=("${id}|${local_path}|${remote_path}|push") ;;
+    esac
+  done < <(default_folder_candidates)
+
+  if [[ ${#pairs[@]} -eq 0 ]]; then
+    mkdir -p "$HOME/Documents"
+    pairs+=("documents|$HOME/Documents|/my-files/Linux/Documents|push")
+  fi
+
+  write_simple_config "$bin" "${pairs[@]}"
+
+  if use_french; then
+    say ""
+    say "Configuration créée automatiquement :"
+    say "  $CONFIG_FILE"
+    say ""
+    say "Dossiers qui seront sauvegardés sur Proton Drive :"
+    local p
+    for p in "${pairs[@]}"; do
+      IFS='|' read -r id local_path remote_path _ <<<"$p"
+      say "  • $local_path"
+    done
+    say ""
+    say "Étapes suivantes :"
+    say "  1) proton-drive-sync login     (connexion dans le navigateur)"
+    say "  2) proton-drive-sync doctor    (vérification)"
+    say "  3) proton-drive-sync sync      (lancer la sauvegarde)"
+    say ""
+    say "Pour choisir d'autres dossiers : proton-drive-sync setup"
+  else
+    say ""
+    say "Config created automatically:"
+    say "  $CONFIG_FILE"
+    say ""
+    say "Folders that will be backed up to Proton Drive:"
+    local p
+    for p in "${pairs[@]}"; do
+      IFS='|' read -r id local_path remote_path _ <<<"$p"
+      say "  • $local_path"
+    done
+    say ""
+    say "Next steps:"
+    say "  1) proton-drive-sync login"
+    say "  2) proton-drive-sync doctor"
+    say "  3) proton-drive-sync sync"
+    say ""
+    say "To choose different folders: proton-drive-sync setup"
+  fi
+}
+
+cmd_setup() {
+  ensure_dirs
+  local bin id label local_path remote_path custom_local custom_name
+  local -a pairs=()
+
+  bin=$(find_cli_bin)
+
+  if [[ -f "$CONFIG_FILE" ]]; then
+    if use_french; then
+      ask_yn "Une config existe déjà. La remplacer ?" || {
+        say "OK, fichier inchangé : $CONFIG_FILE"
+        return 0
+      }
+    else
+      ask_yn "A config already exists. Replace it?" || {
+        say "OK, left unchanged: $CONFIG_FILE"
+        return 0
+      }
+    fi
+  fi
+
+  if use_french; then
+    say ""
+    say "=============================================="
+    say "  Assistant Proton Drive (sauvegarde simple)"
+    say "=============================================="
+    say ""
+    say "On va choisir quels dossiers de VOTRE ordinateur"
+    say "seront copiés vers Proton Drive (cloud sécurisé)."
+    say "Répondez par O (oui) ou n (non)."
+    say ""
+  else
+    say ""
+    say "=============================================="
+    say "  Proton Drive setup (simple backup)"
+    say "=============================================="
+    say ""
+    say "We will choose which folders on THIS computer"
+    say "are copied to Proton Drive (encrypted cloud)."
+    say "Answer Y (yes) or n (no)."
+    say ""
+  fi
+
+  while IFS='|' read -r id label local_path remote_path; do
+    [[ -n "$id" ]] || continue
+    if use_french; then
+      ask_yn "Sauvegarder « $label » ?" && pairs+=("${id}|${local_path}|${remote_path}|push")
+    else
+      ask_yn "Back up « $label »?" && pairs+=("${id}|${local_path}|${remote_path}|push")
+    fi
+  done < <(default_folder_candidates)
+
+  if use_french; then
+    if ask_yn "Ajouter un autre dossier (chemin personnalisé) ?"; then
+      printf 'Chemin complet du dossier (ex. %s/Projets) : ' "$HOME" >&2
+      read -r custom_local
+      custom_local="${custom_local/#\~/$HOME}"
+      [[ -d "$custom_local" ]] || die "ce dossier n'existe pas : $custom_local"
+      custom_name=$(basename "$custom_local" | tr -c 'A-Za-z0-9_-' '_' | tr '[:upper:]' '[:lower:]')
+      [[ -n "$custom_name" ]] || custom_name="custom"
+      pairs+=("${custom_name}|${custom_local}|/my-files/Linux/${custom_name}|push")
+    fi
+  else
+    if ask_yn "Add another folder (custom path)?"; then
+      printf 'Full folder path (e.g. %s/Projects): ' "$HOME" >&2
+      read -r custom_local
+      custom_local="${custom_local/#\~/$HOME}"
+      [[ -d "$custom_local" ]] || die "folder does not exist: $custom_local"
+      custom_name=$(basename "$custom_local" | tr -c 'A-Za-z0-9_-' '_' | tr '[:upper:]' '[:lower:]')
+      [[ -n "$custom_name" ]] || custom_name="custom"
+      pairs+=("${custom_name}|${custom_local}|/my-files/Linux/${custom_name}|push")
+    fi
+  fi
+
+  if [[ ${#pairs[@]} -eq 0 ]]; then
+    if use_french; then
+      say "Aucun dossier choisi — création d'une sauvegarde Documents par défaut."
+    else
+      say "No folder selected — creating a default Documents backup."
+    fi
+    mkdir -p "$HOME/Documents"
+    pairs+=("documents|$HOME/Documents|/my-files/Linux/Documents|push")
+  fi
+
+  write_simple_config "$bin" "${pairs[@]}"
+
+  if use_french; then
+    say ""
+    say "C'est prêt. Fichier enregistré :"
+    say "  $CONFIG_FILE"
+    say ""
+    say "Dossiers retenus :"
+    local p
+    for p in "${pairs[@]}"; do
+      IFS='|' read -r id local_path remote_path _ <<<"$p"
+      say "  • $local_path"
+    done
+    say ""
+    say "Faites maintenant, dans l'ordre :"
+    say "  1) proton-drive-sync login"
+    say "       → une page s'ouvre dans le navigateur pour vous connecter"
+    say "  2) proton-drive-sync sync"
+    say "       → envoie vos dossiers vers Proton Drive"
+    say ""
+    say "Astuce : proton-drive-sync --dry-run sync"
+    say "       montre ce qui serait envoyé, sans rien copier."
+  else
+    say ""
+    say "Done. Config saved to:"
+    say "  $CONFIG_FILE"
+    say ""
+    say "Selected folders:"
+    local p
+    for p in "${pairs[@]}"; do
+      IFS='|' read -r id local_path remote_path _ <<<"$p"
+      say "  • $local_path"
+    done
+    say ""
+    say "Next, run these in order:"
+    say "  1) proton-drive-sync login"
+    say "       → a browser window opens so you can sign in"
+    say "  2) proton-drive-sync sync"
+    say "       → uploads your folders to Proton Drive"
+    say ""
+    say "Tip: proton-drive-sync --dry-run sync"
+    say "     shows what would be uploaded, without copying anything."
+  fi
 }
 
 cmd_login() {
@@ -472,6 +764,7 @@ main() {
   [[ -n "$cmd" ]] || { usage; exit 1; }
 
   case "$cmd" in
+    setup) cmd_setup ;;
     init) cmd_init ;;
     login) cmd_login ;;
     logout) cmd_logout ;;
