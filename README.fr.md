@@ -150,6 +150,9 @@ WITH_TIMER=1 ./scripts/install-sync.sh
 | « not logged in » / pas connecté | Relancer `proton-drive-sync login` (session graphique ouverte, trousseau déverrouillé) |
 | L’assistant ne trouve aucun dossier | Créer d’abord Documents/Photos dans le gestionnaire de fichiers, puis relancer `setup` |
 | Peur d’envoyer trop de choses | Utiliser d’abord `proton-drive-sync --dry-run sync` |
+| `Node not found : Linux` | Ancien bug : le dossier cloud `/my-files/Linux` n’existait pas. Mettez à jour le script (`git pull` puis `./scripts/install-sync.sh`) puis relancez `sync` — les dossiers distants manquants sont créés automatiquement |
+| Vous avez déplacé le dépôt sur le disque | Sans impact sur la config (`~/.config/...`). Réinstallez juste la commande : `./scripts/install-sync.sh` depuis le nouvel emplacement |
+| Plusieurs questions O/n d’un coup | Corrigé dans les versions récentes : une question à la fois. Mettez à jour et relancez `setup` |
 
 ## Aller plus loin
 

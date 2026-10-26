@@ -154,6 +154,9 @@ Logs: `~/.local/state/proton-drive-sync/logs/`
 | Not logged in | `proton-drive-sync login` (desktop session unlocked) |
 | No folders in setup | Create Documents/Pictures in the file manager, run `setup` again |
 | Want a safe preview | `proton-drive-sync --dry-run sync` |
+| `Node not found : Linux` | Missing remote parent folder. Update the script and re-run `sync` — parents under `/my-files/...` are created automatically |
+| Moved the git clone | Config stays in `~/.config/...`. Re-run `./scripts/install-sync.sh` from the new path |
+| Several Y/n prompts at once | Fixed: answers are read from the terminal only. Update and re-run `setup` |
 
 ## Contributing / security
 

@@ -314,19 +314,37 @@ default_folder_candidates() {
 }
 
 ask_yn() {
-  # $1 prompt, default yes if empty answer
+  # Always read from the terminal — never from a redirected stdin
+  # (e.g. a `while read` loop over folder candidates would steal answers).
   local prompt="$1" reply
   if use_french; then
-    printf '%s [O/n] ' "$prompt" >&2
+    printf '%s [O/n] ' "$prompt" >/dev/tty
   else
-    printf '%s [Y/n] ' "$prompt" >&2
+    printf '%s [Y/n] ' "$prompt" >/dev/tty
   fi
-  read -r reply || true
+  if [[ -r /dev/tty ]]; then
+    read -r reply </dev/tty || true
+  else
+    read -r reply || true
+  fi
+  printf '\n' >/dev/tty 2>/dev/null || true
   reply="${reply:-Y}"
   case "$reply" in
     O|o|Oui|oui|Y|y|yes|YES) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+read_custom_path() {
+  local prompt="$1" value
+  printf '%s' "$prompt" >/dev/tty
+  if [[ -r /dev/tty ]]; then
+    read -r value </dev/tty || true
+  else
+    read -r value || true
+  fi
+  printf '\n' >/dev/tty 2>/dev/null || true
+  printf '%s' "$value"
 }
 
 cmd_init() {
@@ -346,13 +364,17 @@ cmd_init() {
   local -a pairs=()
   bin=$(find_cli_bin)
 
-  while IFS='|' read -r id label local_path remote_path; do
-    [[ -n "$id" ]] || continue
+  local -a candidates=()
+  local entry
+  mapfile -t candidates < <(default_folder_candidates)
+  for entry in "${candidates[@]}"; do
+    [[ -n "$entry" ]] || continue
+    IFS='|' read -r id label local_path remote_path <<<"$entry"
     # Auto-include Documents + Pictures only (safe defaults); others via setup
     case "$id" in
       documents|pictures) pairs+=("${id}|${local_path}|${remote_path}|push") ;;
     esac
-  done < <(default_folder_candidates)
+  done
 
   if [[ ${#pairs[@]} -eq 0 ]]; then
     mkdir -p "$HOME/Documents"
@@ -443,19 +465,22 @@ cmd_setup() {
     say ""
   fi
 
-  while IFS='|' read -r id label local_path remote_path; do
-    [[ -n "$id" ]] || continue
+  local -a candidates=()
+  local entry
+  mapfile -t candidates < <(default_folder_candidates)
+  for entry in "${candidates[@]}"; do
+    [[ -n "$entry" ]] || continue
+    IFS='|' read -r id label local_path remote_path <<<"$entry"
     if use_french; then
       ask_yn "Sauvegarder « $label » ?" && pairs+=("${id}|${local_path}|${remote_path}|push")
     else
       ask_yn "Back up « $label »?" && pairs+=("${id}|${local_path}|${remote_path}|push")
     fi
-  done < <(default_folder_candidates)
+  done
 
   if use_french; then
     if ask_yn "Ajouter un autre dossier (chemin personnalisé) ?"; then
-      printf 'Chemin complet du dossier (ex. %s/Projets) : ' "$HOME" >&2
-      read -r custom_local
+      custom_local=$(read_custom_path "Chemin complet du dossier (ex. $HOME/Projets) : ")
       custom_local="${custom_local/#\~/$HOME}"
       [[ -d "$custom_local" ]] || die "ce dossier n'existe pas : $custom_local"
       custom_name=$(basename "$custom_local" | tr -c 'A-Za-z0-9_-' '_' | tr '[:upper:]' '[:lower:]')
@@ -464,8 +489,7 @@ cmd_setup() {
     fi
   else
     if ask_yn "Add another folder (custom path)?"; then
-      printf 'Full folder path (e.g. %s/Projects): ' "$HOME" >&2
-      read -r custom_local
+      custom_local=$(read_custom_path "Full folder path (e.g. $HOME/Projects): ")
       custom_local="${custom_local/#\~/$HOME}"
       [[ -d "$custom_local" ]] || die "folder does not exist: $custom_local"
       custom_name=$(basename "$custom_local" | tr -c 'A-Za-z0-9_-' '_' | tr '[:upper:]' '[:lower:]')
@@ -610,15 +634,88 @@ run_log_path() {
   printf '%s/%s-%s-%s.log' "$LOG_DIR" "$(date +%Y%m%d-%H%M%S)" "$action" "$name"
 }
 
+remote_exists() {
+  # Quiet existence check (folder or file) on Proton Drive.
+  # In dry-run, pretend missing so create-folder commands are shown.
+  [[ "$DRY_RUN" == "1" ]] && return 1
+  pd filesystem list --json "$1" >/dev/null 2>&1
+}
+
+ensure_remote_dirs() {
+  # Create each missing segment of an absolute Drive path.
+  # Example: /my-files/Linux → create "Linux" under /my-files.
+  # Official CLI: filesystem create-folder <parentPath> <name>
+  # Without this, upload fails with: Node not found : Linux
+  local path="$1"
+  [[ "$path" == /* ]] || { warn "remote path must be absolute: $path"; return 1; }
+
+  local accum="" part next
+  local -a parts=()
+  IFS='/' read -ra parts <<<"$path"
+  for part in "${parts[@]}"; do
+    [[ -z "$part" ]] && continue
+    if [[ -z "$accum" ]]; then
+      accum="/$part"
+      continue
+    fi
+    next="$accum/$part"
+    if remote_exists "$next"; then
+      accum="$next"
+      continue
+    fi
+    info "creating remote folder: $next"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      pd filesystem create-folder --json "$accum" "$part"
+      accum="$next"
+      continue
+    fi
+    # Ignore "already exists" races; fail only if still missing afterwards.
+    pd filesystem create-folder --json "$accum" "$part" >/dev/null 2>&1 || true
+    if ! remote_exists "$next"; then
+      if ! pd filesystem create-folder "$accum" "$part"; then
+        warn "cannot create remote folder $next (parent: $accum)"
+        return 1
+      fi
+    fi
+    accum="$next"
+  done
+  return 0
+}
+
+upload_parent_for() {
+  # CLI signature: upload <local...> <parentPath>
+  # For local .../Documents → remote .../Linux/Documents, upload into .../Linux
+  # so the folder name matches. Otherwise upload into the full remote folder.
+  local local_path="$1" remote_path="$2"
+  if [[ "$(basename "$local_path")" == "$(basename "$remote_path")" ]]; then
+    dirname "$remote_path"
+  else
+    printf '%s' "$remote_path"
+  fi
+}
+
 push_pair() {
   local name="$1"
   local local_path="${PAIR_LOCAL[$name]}"
   local remote_path="${PAIR_REMOTE[$name]}"
   [[ -d "$local_path" ]] || die "pair $name: local directory missing: $local_path"
 
-  local logfile
+  local logfile upload_parent
   logfile=$(run_log_path push "$name")
+  upload_parent=$(upload_parent_for "$local_path" "$remote_path")
+
   info "push [$name] $local_path → $remote_path"
+  # Parents must exist ("Node not found : Linux" = missing /my-files/Linux).
+  if ! ensure_remote_dirs "$upload_parent"; then
+    warn "push aborted for $name: could not prepare remote parent $upload_parent"
+    return 1
+  fi
+  if [[ "$upload_parent" == "$remote_path" ]]; then
+    if ! ensure_remote_dirs "$remote_path"; then
+      warn "push aborted for $name: could not prepare remote folder $remote_path"
+      return 1
+    fi
+  fi
 
   local -a args=(
     filesystem upload
@@ -627,7 +724,7 @@ push_pair() {
     --folder-conflict-strategy "$PUSH_FOLDER_CONFLICT"
   )
   [[ "$SKIP_THUMBNAILS" == "1" ]] && args+=(--skip-thumbnails)
-  args+=("$local_path" "$remote_path")
+  args+=("$local_path" "$upload_parent")
 
   if [[ "$DRY_RUN" == "1" ]]; then
     pd "${args[@]}"
@@ -636,6 +733,13 @@ push_pair() {
 
   if ! pd "${args[@]}" >"$logfile" 2>&1; then
     warn "push failed for $name — see $logfile"
+    if grep -qi 'Node not found' "$logfile" 2>/dev/null; then
+      warn "hint: a parent folder is missing on Proton Drive; sync now tries to create them automatically — re-run after updating the script"
+    fi
+    # Show the useful CLI line without dumping secrets
+    grep -iE 'Node not found|error|Error' "$logfile" 2>/dev/null | tail -5 | while IFS= read -r line; do
+      warn "cli: $line"
+    done || true
     return 1
   fi
   info "push [$name] OK → $logfile"
