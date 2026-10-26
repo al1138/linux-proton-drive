@@ -1,0 +1,14 @@
+[Unit]
+Description=Schedule Proton Drive sync (safety-first periodic backup)
+Documentation=https://proton.me/support/drive-cli
+
+[Timer]
+# After login, then every 6 hours. Adjust to taste.
+OnBootSec=5min
+OnUnitActiveSec=6h
+Persistent=true
+RandomizedDelaySec=3min
+Unit=proton-drive-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=Proton Drive folder sync (official CLI wrapper)
+Documentation=https://proton.me/support/drive-cli
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Atomic run: authenticate via keyring, transfer, exit (no persistent daemon).
+ExecStart=%h/.local/bin/proton-drive-sync sync
+# Nice + IO: prefer desktop responsiveness on Mint
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Do not restart in a tight loop on auth/network failure
+Restart=no
+
+[Install]
+WantedBy=default.target

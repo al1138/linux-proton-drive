@@ -1,0 +1,487 @@
+#!/usr/bin/env bash
+# Thin, safety-first scheduler around the official Proton Drive CLI.
+# Not a real-time sync engine — intentional: atomic runs, no live session daemon.
+set -euo pipefail
+
+readonly APP_NAME="proton-drive-sync"
+readonly VERSION="1.0.0"
+
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+
+CONFIG_DIR="${PROTON_DRIVE_SYNC_CONFIG_DIR:-$XDG_CONFIG_HOME/$APP_NAME}"
+STATE_DIR="${PROTON_DRIVE_SYNC_STATE_DIR:-$XDG_STATE_HOME/$APP_NAME}"
+CONFIG_FILE="${PROTON_DRIVE_SYNC_CONFIG:-$CONFIG_DIR/config}"
+LOCK_FILE="$STATE_DIR/sync.lock"
+LOG_DIR="$STATE_DIR/logs"
+
+# Defaults (overridable in config)
+PROTON_DRIVE_BIN="${PROTON_DRIVE_BIN:-proton-drive}"
+CREDENTIALS_STORE="${CREDENTIALS_STORE:-keychain}"
+SKIP_THUMBNAILS="${SKIP_THUMBNAILS:-1}"
+PUSH_FILE_CONFLICT="${PUSH_FILE_CONFLICT:-create-new-revision}"
+PUSH_FOLDER_CONFLICT="${PUSH_FOLDER_CONFLICT:-merge}"
+PULL_FILE_CONFLICT="${PULL_FILE_CONFLICT:-skip}"
+PULL_FOLDER_CONFLICT="${PULL_FOLDER_CONFLICT:-merge}"
+ALLOW_DELETE="${ALLOW_DELETE:-0}"
+DRY_RUN="${DRY_RUN:-0}"
+VERBOSE="${VERBOSE:-0}"
+
+declare -a PAIR_NAMES=()
+declare -A PAIR_LOCAL=()
+declare -A PAIR_REMOTE=()
+declare -A PAIR_MODE=()
+
+usage() {
+  cat <<EOF
+$APP_NAME $VERSION — sync folders via official proton-drive CLI
+
+Usage:
+  $APP_NAME <command> [options] [pair...]
+
+Commands:
+  init              Create config dir + example config
+  login             Browser login (stores session in OS secret store)
+  logout            Clear CLI session
+  status            Show binary, auth, pairs, last runs
+  push [pair...]    Local → Proton Drive
+  pull [pair...]    Proton Drive → local
+  sync [pair...]    Run each pair according to its mode (push|pull|both)
+  doctor            Preflight checks (binary, secret store, paths)
+
+Options:
+  -c, --config PATH   Config file (default: $CONFIG_FILE)
+  -n, --dry-run       Print planned CLI commands only
+  -v, --verbose       Pass --verbose to proton-drive
+  -h, --help          Show help
+
+Environment:
+  PROTON_DRIVE_BIN              Path to proton-drive binary
+  PROTON_DRIVE_CREDENTIALS_STORE  keychain | pass  (unsafe_file refused)
+  PROTON_DRIVE_SYNC_CONFIG      Override config path
+
+Security defaults:
+  • No remote/local deletes unless ALLOW_DELETE=1 in config
+  • Push uses create-new-revision (keeps Drive history)
+  • Pull uses file conflict skip (never overwrite local silently)
+  • Concurrent runs blocked with flock
+EOF
+}
+
+die() { echo "error: $*" >&2; exit 1; }
+log() { printf '%s %s\n' "$(date -Iseconds)" "$*" >&2; }
+info() { log "INFO  $*"; }
+warn() { log "WARN  $*"; }
+
+ensure_dirs() {
+  mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
+  chmod 700 "$CONFIG_DIR" "$STATE_DIR" 2>/dev/null || true
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+unquote() {
+  local v="$1"
+  if [[ "$v" =~ ^\"(.*)\"$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  elif [[ "$v" =~ ^\'(.*)\'$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  else
+    printf '%s' "$v"
+  fi
+}
+
+set_known_config() {
+  local key="$1" val="$2"
+  case "$key" in
+    PROTON_DRIVE_BIN) PROTON_DRIVE_BIN="$val" ;;
+    CREDENTIALS_STORE) CREDENTIALS_STORE="$val" ;;
+    SKIP_THUMBNAILS) SKIP_THUMBNAILS="$val" ;;
+    PUSH_FILE_CONFLICT) PUSH_FILE_CONFLICT="$val" ;;
+    PUSH_FOLDER_CONFLICT) PUSH_FOLDER_CONFLICT="$val" ;;
+    PULL_FILE_CONFLICT) PULL_FILE_CONFLICT="$val" ;;
+    PULL_FOLDER_CONFLICT) PULL_FOLDER_CONFLICT="$val" ;;
+    PULL_FILE_CONFLICT_ALLOW_DELETE) PULL_FILE_CONFLICT_ALLOW_DELETE="$val" ;;
+    PULL_FOLDER_CONFLICT_ALLOW_DELETE) PULL_FOLDER_CONFLICT_ALLOW_DELETE="$val" ;;
+    ALLOW_DELETE) ALLOW_DELETE="$val" ;;
+    VERBOSE) VERBOSE="$val" ;;
+    *) die "unknown config key: $key (refusing to parse arbitrary assignments)" ;;
+  esac
+}
+
+load_config() {
+  [[ -f "$CONFIG_FILE" ]] || die "config not found: $CONFIG_FILE (run: $APP_NAME init)"
+
+  local perms
+  perms=$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || stat -f '%OLp' "$CONFIG_FILE")
+  if [[ "$perms" != "600" && "$perms" != "400" ]]; then
+    warn "config permissions are $perms; recommend chmod 600 $CONFIG_FILE"
+  fi
+
+  PAIR_NAMES=()
+  PAIR_LOCAL=()
+  PAIR_REMOTE=()
+  PAIR_MODE=()
+
+  local line key val name rest local_path remote_path pair_mode
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+
+    if [[ "$line" =~ ^PAIR_([A-Za-z0-9_-]+)=(.*)$ ]]; then
+      name="${BASH_REMATCH[1]}"
+      rest="$(unquote "${BASH_REMATCH[2]}")"
+      IFS='|' read -r local_path remote_path pair_mode <<<"$rest"
+      [[ -n "${local_path:-}" && -n "${remote_path:-}" ]] || die "bad PAIR_$name value"
+      pair_mode="${pair_mode:-push}"
+      case "$pair_mode" in
+        push|pull|both) ;;
+        *) die "PAIR_$name: invalid mode '$pair_mode' (push|pull|both)" ;;
+      esac
+      [[ "$remote_path" == /* ]] || die "PAIR_$name: remote path must be absolute in Drive (start with /)"
+      [[ "$local_path" == /* ]] || die "PAIR_$name: local path must be absolute"
+      PAIR_NAMES+=("$name")
+      PAIR_LOCAL["$name"]="$local_path"
+      PAIR_REMOTE["$name"]="$remote_path"
+      PAIR_MODE["$name"]="$pair_mode"
+      continue
+    fi
+
+    if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      val="$(unquote "${BASH_REMATCH[2]}")"
+      set_known_config "$key" "$val"
+      continue
+    fi
+
+    die "invalid config line: $line"
+  done <"$CONFIG_FILE"
+
+  case "${CREDENTIALS_STORE}" in
+    keychain|pass) ;;
+    unsafe_file)
+      die "CREDENTIALS_STORE=unsafe_file is refused (stores session in plaintext)"
+      ;;
+    *)
+      die "invalid CREDENTIALS_STORE='$CREDENTIALS_STORE' (use keychain or pass)"
+      ;;
+  esac
+  export PROTON_DRIVE_CREDENTIALS_STORE="$CREDENTIALS_STORE"
+
+  [[ ${#PAIR_NAMES[@]} -gt 0 ]] || die "no PAIR_* entries in $CONFIG_FILE"
+}
+
+resolve_bin() {
+  if [[ "$PROTON_DRIVE_BIN" == /* ]]; then
+    [[ -x "$PROTON_DRIVE_BIN" ]] || die "PROTON_DRIVE_BIN not executable: $PROTON_DRIVE_BIN"
+    echo "$PROTON_DRIVE_BIN"
+    return
+  fi
+  command -v "$PROTON_DRIVE_BIN" || die "proton-drive not found in PATH (run scripts/install-cli.sh)"
+}
+
+pd() {
+  local bin
+  bin=$(resolve_bin)
+  local -a args=("$bin")
+  [[ "$VERBOSE" == "1" ]] && args+=(--verbose)
+  args+=("$@")
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf 'DRY-RUN:'
+    printf ' %q' "${args[@]}"
+    printf '\n'
+    return 0
+  fi
+  "${args[@]}"
+}
+
+with_lock() {
+  ensure_dirs
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+      die "another $APP_NAME run holds $LOCK_FILE"
+    fi
+    "$@"
+    return
+  fi
+
+  # Fallback for platforms without util-linux flock (dev hosts).
+  LOCK_DIR="${LOCK_FILE}.d"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    die "another $APP_NAME run holds $LOCK_DIR"
+  fi
+  # shellcheck disable=SC2064
+  trap 'rmdir "${LOCK_DIR:-}" 2>/dev/null || true' EXIT
+  "$@"
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+  trap - EXIT
+}
+
+cmd_init() {
+  ensure_dirs
+  local example
+  example="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/config/config.example"
+  if [[ -f "$CONFIG_FILE" ]]; then
+    info "config already exists: $CONFIG_FILE"
+  else
+    [[ -f "$example" ]] || die "missing example config at $example"
+    sed "s|__HOME__|$HOME|g" "$example" >"$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+    info "wrote $CONFIG_FILE (edit pairs before first sync)"
+  fi
+  info "state/logs: $STATE_DIR"
+}
+
+cmd_login() {
+  load_config
+  info "opening browser login via official CLI…"
+  pd auth login
+}
+
+cmd_logout() {
+  load_config
+  pd auth logout
+}
+
+auth_ok() {
+  # list root areas; fails if not logged in
+  pd filesystem list / --json >/dev/null 2>&1
+}
+
+cmd_doctor() {
+  load_config
+  local bin ok=0
+  bin=$(resolve_bin)
+  info "binary: $bin"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    info "dry-run: skip version/auth probes"
+    return 0
+  fi
+  pd version || die "proton-drive version failed"
+  case "$CREDENTIALS_STORE" in
+    keychain)
+      if command -v secret-tool >/dev/null 2>&1; then
+        info "libsecret tooling present (secret-tool)"
+      else
+        warn "secret-tool not found — install libsecret-tools (Mint: apt install libsecret-tools)"
+      fi
+      ;;
+    pass)
+      command -v pass >/dev/null 2>&1 || die "pass not installed but CREDENTIALS_STORE=pass"
+      ;;
+  esac
+  if auth_ok; then
+    info "auth: OK"
+  else
+    warn "auth: not logged in (run: $APP_NAME login)"
+    ok=1
+  fi
+  local name
+  for name in "${PAIR_NAMES[@]}"; do
+    local lp="${PAIR_LOCAL[$name]}"
+    if [[ -d "$lp" ]]; then
+      info "pair $name local OK: $lp → ${PAIR_REMOTE[$name]} (${PAIR_MODE[$name]})"
+    else
+      warn "pair $name local missing: $lp"
+      ok=1
+    fi
+  done
+  return "$ok"
+}
+
+cmd_status() {
+  load_config
+  echo "config:  $CONFIG_FILE"
+  echo "binary:  $(resolve_bin)"
+  echo "creds:   $CREDENTIALS_STORE"
+  echo "allow_delete: $ALLOW_DELETE"
+  echo "pairs:"
+  local name
+  for name in "${PAIR_NAMES[@]}"; do
+    printf '  %-16s %-5s  %s  ↔  %s\n' \
+      "$name" "${PAIR_MODE[$name]}" "${PAIR_LOCAL[$name]}" "${PAIR_REMOTE[$name]}"
+  done
+  echo "recent logs:"
+  ls -1t "$LOG_DIR"/*.log 2>/dev/null | head -5 || echo "  (none)"
+  if [[ "$DRY_RUN" != "1" ]]; then
+    if auth_ok; then echo "auth: OK"; else echo "auth: NOT LOGGED IN"; fi
+  fi
+}
+
+run_log_path() {
+  local action="$1" name="$2"
+  printf '%s/%s-%s-%s.log' "$LOG_DIR" "$(date +%Y%m%d-%H%M%S)" "$action" "$name"
+}
+
+push_pair() {
+  local name="$1"
+  local local_path="${PAIR_LOCAL[$name]}"
+  local remote_path="${PAIR_REMOTE[$name]}"
+  [[ -d "$local_path" ]] || die "pair $name: local directory missing: $local_path"
+
+  local logfile
+  logfile=$(run_log_path push "$name")
+  info "push [$name] $local_path → $remote_path"
+
+  local -a args=(
+    filesystem upload
+    --json
+    --file-conflict-strategy "$PUSH_FILE_CONFLICT"
+    --folder-conflict-strategy "$PUSH_FOLDER_CONFLICT"
+  )
+  [[ "$SKIP_THUMBNAILS" == "1" ]] && args+=(--skip-thumbnails)
+  args+=("$local_path" "$remote_path")
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    pd "${args[@]}"
+    return 0
+  fi
+
+  if ! pd "${args[@]}" >"$logfile" 2>&1; then
+    warn "push failed for $name — see $logfile"
+    return 1
+  fi
+  info "push [$name] OK → $logfile"
+}
+
+pull_pair() {
+  local name="$1"
+  local local_path="${PAIR_LOCAL[$name]}"
+  local remote_path="${PAIR_REMOTE[$name]}"
+  mkdir -p "$local_path"
+
+  local file_strategy="$PULL_FILE_CONFLICT"
+  local folder_strategy="$PULL_FOLDER_CONFLICT"
+  if [[ "$ALLOW_DELETE" == "1" ]]; then
+    # Still prefer remove-on-conflict over silent wipe of whole trees.
+    file_strategy="${PULL_FILE_CONFLICT_ALLOW_DELETE:-remove}"
+    folder_strategy="${PULL_FOLDER_CONFLICT_ALLOW_DELETE:-merge}"
+  fi
+
+  local logfile
+  logfile=$(run_log_path pull "$name")
+  info "pull [$name] $remote_path → $local_path (file=$file_strategy)"
+
+  local -a args=(
+    filesystem download
+    --json
+    --file-conflict-strategy "$file_strategy"
+    --folder-conflict-strategy "$folder_strategy"
+    "$remote_path"
+    "$local_path"
+  )
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    pd "${args[@]}"
+    return 0
+  fi
+
+  if ! pd "${args[@]}" >"$logfile" 2>&1; then
+    warn "pull failed for $name — see $logfile"
+    return 1
+  fi
+  info "pull [$name] OK → $logfile"
+}
+
+select_pairs() {
+  local -a wanted=("$@")
+  if [[ ${#wanted[@]} -eq 0 ]]; then
+    printf '%s\n' "${PAIR_NAMES[@]}"
+    return
+  fi
+  local w
+  for w in "${wanted[@]}"; do
+    [[ -n "${PAIR_LOCAL[$w]+x}" ]] || die "unknown pair: $w"
+    printf '%s\n' "$w"
+  done
+}
+
+cmd_push() {
+  load_config
+  local name rc=0
+  while IFS= read -r name; do
+    push_pair "$name" || rc=1
+  done < <(select_pairs "$@")
+  return "$rc"
+}
+
+cmd_pull() {
+  load_config
+  if [[ "$ALLOW_DELETE" != "1" && "$PULL_FILE_CONFLICT" == "remove" ]]; then
+    die "PULL_FILE_CONFLICT=remove requires ALLOW_DELETE=1"
+  fi
+  local name rc=0
+  while IFS= read -r name; do
+    pull_pair "$name" || rc=1
+  done < <(select_pairs "$@")
+  return "$rc"
+}
+
+cmd_sync() {
+  load_config
+  local name rc=0 mode
+  while IFS= read -r name; do
+    mode="${PAIR_MODE[$name]}"
+    case "$mode" in
+      push) push_pair "$name" || rc=1 ;;
+      pull) pull_pair "$name" || rc=1 ;;
+      both)
+        # Push first so local edits are preserved as Drive revisions,
+        # then pull with skip so remote-only files appear without clobbering local.
+        push_pair "$name" || rc=1
+        pull_pair "$name" || rc=1
+        ;;
+    esac
+  done < <(select_pairs "$@")
+  return "$rc"
+}
+
+main() {
+  local cmd=""
+  local -a rest=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help) usage; exit 0 ;;
+      -c|--config)
+        CONFIG_FILE="${2:?}"
+        CONFIG_DIR="$(dirname "$CONFIG_FILE")"
+        shift 2
+        ;;
+      -n|--dry-run) DRY_RUN=1; shift ;;
+      -v|--verbose) VERBOSE=1; shift ;;
+      -*)
+        die "unknown option: $1"
+        ;;
+      *)
+        if [[ -z "$cmd" ]]; then
+          cmd="$1"
+        else
+          rest+=("$1")
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$cmd" ]] || { usage; exit 1; }
+
+  case "$cmd" in
+    init) cmd_init ;;
+    login) cmd_login ;;
+    logout) cmd_logout ;;
+    status) cmd_status ;;
+    doctor) cmd_doctor ;;
+    push) with_lock cmd_push "${rest[@]+"${rest[@]}"}" ;;
+    pull) with_lock cmd_pull "${rest[@]+"${rest[@]}"}" ;;
+    sync) with_lock cmd_sync "${rest[@]+"${rest[@]}"}" ;;
+    *) die "unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"

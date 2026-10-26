@@ -1,0 +1,14 @@
+# Local / generated (never publish)
+.tmp-*/
+*.bak
+.DS_Store
+
+# Operator secrets and machine-specific state
+config/config
+*.log
+
+# Editor / OS
+*~
+*.swp
+.idea/
+.vscode/
