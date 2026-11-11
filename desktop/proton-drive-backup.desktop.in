@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Sauvegarde Proton Drive
+Name[en]=Proton Drive Backup
+GenericName=Cloud backup
+Comment=Lance une sauvegarde manuelle vers Proton Drive
+Comment[en]=Run a manual backup to Proton Drive
+Exec=@BINDIR@/proton-drive-backup-now
+Icon=folder-remote
+Terminal=false
+Categories=Network;FileTools;Utility;
+Keywords=proton;drive;backup;sauvegarde;cloud;
+StartupNotify=true

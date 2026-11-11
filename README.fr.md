@@ -5,8 +5,9 @@ avec le programme officiel de Proton.
 
 > Projet indépendant (voir [`NOTICE`](NOTICE)).  
 > Ce n’est **pas** une synchronisation instantanée comme Dropbox : c’est une
-> **sauvegarde** que vous lancez de temps en temps (ou qui se lance toute seule
-> toutes les quelques heures). C’est plus sûr.
+> **sauvegarde** automatique (au démarrage, puis toutes les **5 minutes**) et
+> aussi manuelle via une **icône sur le bureau**. Les fichiers inchangés ne
+> sont pas renvoyés. Les suppressions locales ne sont pas reprises sur le cloud.
 
 ## En deux mots
 
@@ -83,6 +84,46 @@ proton-drive-sync sync
 
 → lance la vraie sauvegarde vers Proton Drive.
 
+## Sauvegarde automatique (installée par défaut)
+
+`./scripts/install-sync.sh` active un minuteur systemd utilisateur :
+
+- environ **1 minute** après la connexion / le démarrage de session
+- puis **toutes les 5 minutes**
+
+Vérifier :
+
+```bash
+systemctl --user list-timers | grep proton
+```
+
+Désactiver :
+
+```bash
+systemctl --user disable --now proton-drive-sync.timer
+```
+
+Réinstaller sans minuteur : `WITH_TIMER=0 ./scripts/install-sync.sh`
+
+## Icône sur le bureau (manuel)
+
+L’installation place aussi :
+
+- une icône **« Sauvegarde Proton Drive »** sur le Bureau
+- la même entrée dans le menu des applications
+
+Un double-clic lance une sauvegarde immédiate et affiche une notification
+(« en cours… » / « terminée » / erreur).
+
+Sur Mint, si le système demande de « faire confiance » au lanceur, acceptez
+(ou clic droit → Autoriser le lancement).
+
+Équivalent en terminal :
+
+```bash
+proton-drive-backup-now
+```
+
 ## Que contient le fichier de configuration ?
 
 Emplacement : `~/.config/proton-drive-sync/config`
@@ -133,15 +174,6 @@ PAIR_projets="/home/USER/Projets|/my-files/Linux/projets|push"
 ```
 
 Remplacez `/home/USER` par votre vrai dossier personnel (celui affiché par la commande `echo $HOME`).
-
-## Sauvegarde automatique (optionnel)
-
-Pour lancer la sauvegarde tout seul toutes les 6 heures :
-
-```bash
-cd ~/linux-proton-drive   # ou l'endroit où vous avez cloné le projet
-WITH_TIMER=1 ./scripts/install-sync.sh
-```
 
 ## En cas de problème
 

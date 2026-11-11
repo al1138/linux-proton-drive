@@ -1,13 +1,13 @@
 [Unit]
-Description=Schedule Proton Drive sync (safety-first periodic backup)
+Description=Schedule Proton Drive sync (startup + every 5 minutes)
 Documentation=https://proton.me/support/drive-cli
 
 [Timer]
-# After login, then every 6 hours. Adjust to taste.
-OnBootSec=5min
-OnUnitActiveSec=6h
+# Shortly after login/boot, then every 5 minutes after the last run finishes.
+OnBootSec=1min
+OnUnitActiveSec=5min
 Persistent=true
-RandomizedDelaySec=3min
+RandomizedDelaySec=15
 Unit=proton-drive-sync.service
 
 [Install]

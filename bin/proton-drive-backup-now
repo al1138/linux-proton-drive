@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# One-click manual backup (desktop icon / menu). Shows a desktop notification.
+set -euo pipefail
+
+SYNC_BIN="${PROTON_DRIVE_SYNC_BIN:-$HOME/.local/bin/proton-drive-sync}"
+if [[ ! -x "$SYNC_BIN" ]]; then
+  if command -v proton-drive-sync >/dev/null 2>&1; then
+    SYNC_BIN=$(command -v proton-drive-sync)
+  else
+    notify-send -u critical "Proton Drive" "Commande introuvable. Réinstallez avec ./scripts/install-sync.sh" 2>/dev/null || true
+    echo "error: proton-drive-sync not found" >&2
+    exit 1
+  fi
+fi
+
+notify() {
+  local urgency="${3:-normal}"
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send -u "$urgency" "Proton Drive" "$1" 2>/dev/null || true
+  fi
+  echo "$2 $1" >&2
+}
+
+notify "Sauvegarde en cours…" "INFO"
+if "$SYNC_BIN" sync; then
+  notify "Sauvegarde terminée." "INFO"
+  exit 0
+fi
+notify "Échec de la sauvegarde. Ouvrez un terminal : journalctl --user -u proton-drive-sync.service -n 30" "ERROR" critical
+exit 1

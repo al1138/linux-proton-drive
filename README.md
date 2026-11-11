@@ -38,10 +38,22 @@ proton-drive-sync --dry-run sync   # preview only
 proton-drive-sync sync        # real backup
 ```
 
-Optional automatic backup every 6 hours:
+### Auto backup + desktop icon (enabled by default)
+
+`./scripts/install-sync.sh` enables a **systemd user timer**:
+
+- ~**1 minute** after login / session start
+- then every **5 minutes**
+
+It also installs a desktop launcher **« Sauvegarde Proton Drive »** (Desktop +
+app menu). Double-click runs an immediate backup with a desktop notification.
 
 ```bash
-WITH_TIMER=1 ./scripts/install-sync.sh
+systemctl --user list-timers | grep proton          # check timer
+proton-drive-backup-now                             # same as the icon
+systemctl --user disable --now proton-drive-sync.timer   # turn off auto
+WITH_TIMER=0 ./scripts/install-sync.sh              # reinstall without timer
+WITH_DESKTOP=0 ./scripts/install-sync.sh            # without desktop icon
 ```
 
 ## What the config is (plain language)
@@ -136,7 +148,7 @@ Logs: `~/.local/state/proton-drive-sync/logs/`
 
 ## Limits
 
-- Not instant sync on every save (use the timer or run `sync` yourself).
+- Not instant sync on every keystroke (timer every 5 minutes + manual icon). Unchanged files are skipped by the official CLI.
 - Local deletions stay on Drive on purpose.
 - Proton Docs/Sheets are not downloaded as normal files (CLI limit).
 - Follow Proton [fair use](https://proton.me/blog/proton-drive-cli) guidance.
