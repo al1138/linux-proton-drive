@@ -164,6 +164,7 @@ Logs: `~/.local/state/proton-drive-sync/logs/`
 | Symptom | What to try |
 |---------|-------------|
 | Not logged in | `proton-drive-sync login` (desktop session unlocked) |
+| `locked collection` / `ERR_SECRETS_PLATFORM_ERROR` | Unlock the Login keyring (Seahorse / Mint session), install `gnome-keyring`, retry login — or set `CREDENTIALS_STORE="pass"` |
 | No folders in setup | Create Documents/Pictures in the file manager, run `setup` again |
 | Want a safe preview | `proton-drive-sync --dry-run sync` |
 | `Node not found : Linux` | Missing remote parent folder. Update the script and re-run `sync` — parents under `/my-files/...` are created automatically |

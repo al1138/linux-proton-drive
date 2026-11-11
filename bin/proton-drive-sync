@@ -553,10 +553,58 @@ cmd_setup() {
   fi
 }
 
+print_keyring_help() {
+  if use_french; then
+    say ""
+    say "Le trousseau de mots de passe du système est verrouillé (ou absent)."
+    say "Proton ne peut pas y enregistrer la session."
+    say ""
+    say "À faire sur Linux Mint (session graphique) :"
+    say "  1) Déverrouillez l'écran / reconnectez-vous à Cinnamon"
+    say "  2) Installez si besoin :"
+    say "       sudo apt install -y gnome-keyring libsecret-1-0 libsecret-tools seahorse"
+    say "  3) Ouvrez « Mots de passe et clés » (Seahorse) et déverrouillez"
+    say "     le trousseau « Connexion » / « Login »"
+    say "  4) Relancez :  proton-drive-sync login"
+    say ""
+    say "Alternative (sans trousseau graphique) — store « pass » :"
+    say "  sudo apt install -y pass gnupg"
+    say "  # puis dans ~/.config/proton-drive-sync/config :"
+    say "  #   CREDENTIALS_STORE=\"pass\""
+    say "  pass init VOTRE_EMAIL_GPG"
+    say "  proton-drive-sync login"
+  else
+    say ""
+    say "The OS secret store (keyring) is locked or missing."
+    say "Proton cannot save the session there."
+    say ""
+    say "On Linux Mint (graphical session):"
+    say "  1) Unlock the screen / log into Cinnamon"
+    say "  2) sudo apt install -y gnome-keyring libsecret-1-0 libsecret-tools seahorse"
+    say "  3) Open « Passwords and Keys » (Seahorse) and unlock the Login keyring"
+    say "  4) Retry: proton-drive-sync login"
+    say ""
+    say "Alternative: set CREDENTIALS_STORE=\"pass\" in the config and use pass(1)."
+  fi
+}
+
 cmd_login() {
   load_config
   info "opening browser login via official CLI…"
-  pd auth login
+  local logfile rc=0
+  logfile=$(mktemp)
+  set +e
+  pd auth login 2>&1 | tee "$logfile"
+  rc=${PIPESTATUS[0]}
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    if grep -qiE 'locked collection|ERR_SECRETS_PLATFORM_ERROR|libsecret|secrets' "$logfile"; then
+      print_keyring_help
+    fi
+    rm -f "$logfile"
+    return "$rc"
+  fi
+  rm -f "$logfile"
 }
 
 cmd_logout() {
@@ -583,8 +631,22 @@ cmd_doctor() {
     keychain)
       if command -v secret-tool >/dev/null 2>&1; then
         info "libsecret tooling present (secret-tool)"
+        # Probe whether the default collection accepts writes (locked keyring → fail).
+        if ! echo -n "probe" | secret-tool store --label="proton-drive-sync-doctor" proton-drive-sync doctor-probe 2>/dev/null; then
+          warn "keyring appears LOCKED or unavailable (ERR_SECRETS_PLATFORM_ERROR risk)"
+          print_keyring_help
+          ok=1
+        else
+          secret-tool clear proton-drive-sync doctor-probe 2>/dev/null || true
+          info "keyring: writable OK"
+        fi
       else
         warn "secret-tool not found — install libsecret-tools (Mint: apt install libsecret-tools)"
+        ok=1
+      fi
+      if ! command -v gnome-keyring-daemon >/dev/null 2>&1; then
+        warn "gnome-keyring not found — install: sudo apt install -y gnome-keyring"
+        ok=1
       fi
       ;;
     pass)

@@ -175,11 +175,34 @@ PAIR_projets="/home/USER/Projets|/my-files/Linux/projets|push"
 
 Remplacez `/home/USER` par votre vrai dossier personnel (celui affiché par la commande `echo $HOME`).
 
+## Connexion : trousseau verrouillé
+
+Si `login` affiche `locked collection` / `ERR_SECRETS_PLATFORM_ERROR` :
+
+```bash
+sudo apt install -y gnome-keyring libsecret-1-0 libsecret-tools seahorse
+```
+
+1. Restez dans la **session graphique** Mint (pas seulement SSH).
+2. Ouvrez **Mots de passe et clés** (Seahorse) → déverrouillez le trousseau **Connexion**.
+3. Relancez : `proton-drive-sync login`
+
+Autre option : stocker la session avec `pass` (chiffré GPG) :
+
+```bash
+sudo apt install -y pass gnupg
+# dans ~/.config/proton-drive-sync/config :
+# CREDENTIALS_STORE="pass"
+pass init VOTRE_EMAIL_GPG
+proton-drive-sync login
+```
+
 ## En cas de problème
 
 | Message / situation | Que faire |
 |---------------------|-----------|
 | « not logged in » / pas connecté | Relancer `proton-drive-sync login` (session graphique ouverte, trousseau déverrouillé) |
+| `Cannot create an item in a locked collection` / `ERR_SECRETS_PLATFORM_ERROR` | Le **trousseau** (mots de passe système) est verrouillé. Déverrouillez-le (Seahorse / session Mint), installez `gnome-keyring`, puis `proton-drive-sync login`. Ou utilisez `CREDENTIALS_STORE="pass"` (voir ci-dessous) |
 | L’assistant ne trouve aucun dossier | Créer d’abord Documents/Photos dans le gestionnaire de fichiers, puis relancer `setup` |
 | Peur d’envoyer trop de choses | Utiliser d’abord `proton-drive-sync --dry-run sync` |
 | `Node not found : Linux` | Ancien bug : le dossier cloud `/my-files/Linux` n’existait pas. Mettez à jour le script (`git pull` puis `./scripts/install-sync.sh`) puis relancez `sync` — les dossiers distants manquants sont créés automatiquement |
